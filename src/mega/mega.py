@@ -656,7 +656,7 @@ class Mega:
         nodes = self.get_files()
         return self.get_folder_link(nodes[node_id])
 
-    def download_url(self, url, dest_path=None, dest_filename=None):
+    def download_url(self, url, dest_path=None, dest_filename=None,progress=None,progress_args=tuple()):
         """
         Download a file by it's public url
         """
@@ -669,6 +669,8 @@ class Mega:
             dest_path=dest_path,
             dest_filename=dest_filename,
             is_public=True,
+            progress=progress,
+            progress_args=progress_args,
         )
 
     def _download_file(
@@ -678,7 +680,9 @@ class Mega:
         dest_path=None,
         dest_filename=None,
         is_public=False,
-        file=None
+        file=None,
+        progress=None,
+        progress_args=tuple(),
     ):
         if file is None:
             if is_public:
@@ -726,7 +730,6 @@ class Mega:
         else:
             file_name = attribs['n']
 
-        input_file = requests.get(file_url, stream=True).raw
 
         if dest_path is None:
             dest_path = ''
@@ -747,9 +750,13 @@ class Mega:
                 k_str, AES.MODE_CBC, mac_str.encode("utf8")
             )
             iv_str = a32_to_str([iv[0], iv[1], iv[0], iv[1]])
-
+            res_iter = requests.get(file_url, stream=True).iter_content(chunk_size=1024*1024)
+            buffer = bytearray()
             for chunk_start, chunk_size in get_chunks(file_size):
-                chunk = input_file.read(chunk_size)
+                while len(buffer) < chunk_size:
+                    buffer += next(res_iter)
+                chunk = buffer[:chunk_size]
+                buffer[:chunk_size] = b''
                 chunk = aes.decrypt(chunk)
                 temp_output_file.write(chunk)
 
@@ -770,9 +777,7 @@ class Mega:
                 mac_str = mac_encryptor.encrypt(encryptor.encrypt(block))
 
                 file_info = os.stat(temp_output_file.name)
-                logger.info(
-                    '%s of %s downloaded', file_info.st_size, file_size
-                )
+                progress(file_info.st_size, file_size)
             file_mac = str_to_a32(mac_str)
             # check mac integrity
             if (
