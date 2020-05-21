@@ -24,10 +24,12 @@ from .crypto import (
     decrypt_key, mpi_to_int, stringhash, prepare_key, make_id, makebyte,
     modular_inverse
 )
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 
 logger = logging.getLogger(__name__)
 
-
+executor = ThreadPoolExecutor((os.cpu_count() or 4)*2)
 class Mega:
     def __init__(self, options=None):
         self.schema = 'https'
@@ -739,9 +741,10 @@ class Mega:
         with tempfile.NamedTemporaryFile(
             mode='w+b', prefix='megapy_', delete=False
         ) as temp_output_file:
+            initial_ctr = ((iv[0] << 32) + iv[1]) << 64
             k_str = a32_to_str(k)
             counter = Counter.new(
-                128, initial_value=((iv[0] << 32) + iv[1]) << 64
+                128, initial_value=initial_ctr
             )
             aes = AES.new(k_str, AES.MODE_CTR, counter=counter)
 
@@ -752,6 +755,33 @@ class Mega:
             iv_str = a32_to_str([iv[0], iv[1], iv[0], iv[1]])
             res_iter = requests.get(file_url, stream=True).iter_content(chunk_size=1024*1024)
             buffer = bytearray()
+            i = 0
+            fut_queue = Queue()
+            def mac(chunk):
+                    encryptor = AES.new(k_str, AES.MODE_CBC, iv_str)
+                    for i in range(0, len(chunk) - 16, 16):
+                        block = chunk[i:i + 16]
+                        encryptor.encrypt(block)
+
+                    # fix for files under 16 bytes failing
+                    if file_size > 16:
+                        i += 16
+                    else:
+                        i = 0
+
+                    block = chunk[i:i + 16]
+                    if len(block) % 16:
+                        block += b'\0' * (16 - (len(block) % 16))
+                    return encryptor.encrypt(block)
+            def mac2():
+                while True:
+                    fut = fut_queue.get()
+                    if fut is None:
+                        break
+                    mac_str = mac_encryptor.encrypt(fut.result())
+                return mac_str
+            
+            mac_fut = executor.submit(mac2)
             for chunk_start, chunk_size in get_chunks(file_size):
                 while len(buffer) < chunk_size:
                     buffer += next(res_iter)
@@ -759,26 +789,14 @@ class Mega:
                 buffer[:chunk_size] = b''
                 chunk = aes.decrypt(chunk)
                 temp_output_file.write(chunk)
-
-                encryptor = AES.new(k_str, AES.MODE_CBC, iv_str)
-                for i in range(0, len(chunk) - 16, 16):
-                    block = chunk[i:i + 16]
-                    encryptor.encrypt(block)
-
-                # fix for files under 16 bytes failing
-                if file_size > 16:
-                    i += 16
-                else:
-                    i = 0
-
-                block = chunk[i:i + 16]
-                if len(block) % 16:
-                    block += b'\0' * (16 - (len(block) % 16))
-                mac_str = mac_encryptor.encrypt(encryptor.encrypt(block))
+                fut = executor.submit(mac,chunk)
+                fut_queue.put(fut)
+                
 
                 file_info = os.stat(temp_output_file.name)
                 progress(file_info.st_size, file_size)
-            file_mac = str_to_a32(mac_str)
+            fut_queue.put(None)
+            file_mac = str_to_a32(mac_fut.result())
             # check mac integrity
             if (
                 file_mac[0] ^ file_mac[1], file_mac[2] ^ file_mac[3]
