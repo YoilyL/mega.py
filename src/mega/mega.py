@@ -782,20 +782,22 @@ class Mega:
                 return mac_str
             
             mac_fut = executor.submit(mac2)
-            for chunk_start, chunk_size in get_chunks(file_size):
-                while len(buffer) < chunk_size:
-                    buffer += next(res_iter)
-                chunk = buffer[:chunk_size]
-                buffer[:chunk_size] = b''
-                chunk = aes.decrypt(chunk)
-                temp_output_file.write(chunk)
-                fut = executor.submit(mac,chunk)
-                fut_queue.put(fut)
-                
+            try:
+                for chunk_start, chunk_size in get_chunks(file_size):
+                    while len(buffer) < chunk_size:
+                        buffer += next(res_iter)
+                    chunk = buffer[:chunk_size]
+                    buffer[:chunk_size] = b''
+                    chunk = aes.decrypt(chunk)
+                    temp_output_file.write(chunk)
+                    fut = executor.submit(mac,chunk)
+                    fut_queue.put(fut)
+                    
 
-                file_info = os.stat(temp_output_file.name)
-                progress(file_info.st_size, file_size)
-            fut_queue.put(None)
+                    file_info = os.stat(temp_output_file.name)
+                    progress(file_info.st_size, file_size)
+            finally:
+                fut_queue.put(None)
             file_mac = str_to_a32(mac_fut.result())
             # check mac integrity
             if (
